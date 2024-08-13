@@ -6,12 +6,11 @@ import json
 import time
 
 from firebase_functions import https_fn
-from firebase_admin import initialize_app
+from firebase_admin import initialize_app, firestore
 
 from openai import OpenAI
 
 from constnats import *
-
 
 initialize_app()
 
@@ -21,9 +20,13 @@ openai_client = OpenAI(
     project="proj_I9dbD5s2inxcrtkDC8Ulsbyw"
 )
 
-chat_assistant = openai_client.beta.assistants.retrieve("asst_ZzNhAYJYr79E1BfRd486UB6C")
-corr_assistant = openai_client.beta.assistants.retrieve("asst_fh2qNWpcRBYVWzDCTBgKyAhn")
-quiz_assistant = openai_client.beta.assistants.retrieve("asst_HZ35JOR0r2zHnSRIUZSuleD5")
+assistants = [
+    openai_client.beta.assistants.retrieve("asst_ZzNhAYJYr79E1BfRd486UB6C"),
+    openai_client.beta.assistants.retrieve("asst_fh2qNWpcRBYVWzDCTBgKyAhn"),
+    openai_client.beta.assistants.retrieve("asst_HZ35JOR0r2zHnSRIUZSuleD5")
+]
+thread_cols = [Fb.COL_CHAT, Fb.COL_CORR, Fb.COL_QUIZ]
+thread_field_keys = [Jk.KEY_CHAT_THREAD_ID, Jk.KEY_CORR_THREAD_ID, Jk.KEY_QUIZ_THREAD_ID ]
 
 
 @https_fn.on_request()
@@ -31,9 +34,37 @@ def on_request_example(req: https_fn.Request) -> https_fn.Response:
     return https_fn.Response(f"This is test")
 
 
+def create_new_thread_and_run(i_learn_type: int, start_messages: list) -> (str, dict, str):
+    # thread 생성.
+    thread = openai_client.beta.threads.create(messages=start_messages)
+    # 학습 type에 따른 run 생성
+    run = openai_client.beta.threads.runs.create(
+        model="gpt-4o",
+        thread_id=thread.id,
+        assistant_id=assistants[i_learn_type].id
+    )
+    # run의 실행 종료 대기
+    while run.status == "queued" or run.status == "in_progress":
+        time.sleep(0.5)
+        run = openai_client.beta.threads.runs.retrieve(
+            thread_id=thread.id,
+            run_id=run.id
+        )
+    # run이 제대로 실행을 종료하지 못했으면(queued, in_progress 둘 다 아님) 상태 코드 리턴
+    if run.status != "completed":
+        return run.status, "", None
+    # 가장 마지막 메세지(assistnat가 준것)만 조회
+    thread_messages = openai_client.beta.threads.messages.list(
+        thread_id=thread.id,
+        order="desc",
+        limit=1
+    )
+    reply_message = thread_messages.data[0] if thread_messages else ""
+    return run.status, reply_message, thread.id
+
+
 @https_fn.on_request()
 def on_request_start_new(req: https_fn.Request) -> https_fn.Response:
-
     # JSON 데이터 추출
     json_req = req.get_json(silent=True)
     if not json_req:
@@ -52,116 +83,67 @@ def on_request_start_new(req: https_fn.Request) -> https_fn.Response:
     print(f"data: {received_data}")
 
     # 스레드를 만들 때 첫 메세지로 넣을 학생 정보를 문자열로 만든다.
+    name = received_data.get(Jk.KEY_NAME)
+    age = received_data.get(Jk.KEY_AGE)
+    nativeLang = received_data.get(Jk.KEY_NATIVE_LANG)
+    learnLang = received_data.get(Jk.KEY_LEARN_LANG)
+    level = received_data.get(Jk.KEY_LEVEL)
+
     student_info_message = f"""
     학생 정보를 알려드리겠습니다.\n
-    - 이름:{received_data.get(Jk.KEY_NAME)}\n
-    - 나이:{received_data.get(Jk.KEY_AGE)}\n
-    - 모국어:{received_data.get(Jk.KEY_NATIVE_LANG)}\n
-    - 학습하고 싶은 언어:{received_data.get(Jk.KEY_LEARN_LANG)}\n
-    - 학습하고 싶은 언어에 대한 학생의 수준:{Jk.KEY_LEVEL}
+    - 이름:{name}\n
+    - 나이:{age}\n
+    - 모국어:{nativeLang}\n
+    - 학습하고 싶은 언어:{learnLang}\n
+    - 학습하고 싶은 언어에 대한 학생의 수준:{level}
     """
 
+    userDocId = received_data.get(Jk.KEY_DOC_ID)
+
     # 모든 스레드의 첫 메세지는 학생정보
-    start_message = [
-            {
-                Ok.KEY_ROLE: Ok.ROLE_USER,
-                Ok.KEY_CONTENT: student_info_message
-            },
-        ]
+    start_messages = [
+        {
+            Ok.KEY_ROLE: Ok.ROLE_USER,
+            Ok.KEY_CONTENT: student_info_message
+        },
+    ]
 
-    # 3개의 스레드를 생성.
-    chat_thread = openai_client.beta.threads.create(messages=start_message)
-    corr_thread = openai_client.beta.threads.create(messages=start_message)
-    quiz_thread = openai_client.beta.threads.create(messages=start_message)
+    # colud function call의 응답 준비
+    response_data = {}
 
-    # 3개의 run 생성
-    chat_run = openai_client.beta.threads.runs.create(
-        model="GPT-4o mini",
-        thread_id=chat_thread.id,
-        assistant_id=chat_assistant.id
-    )
-    corr_run = openai_client.beta.threads.runs.create(
-        model="GPT-4o mini",
-        thread_id=corr_thread.id,
-        assistant_id=corr_assistant.id
-    )
-    quiz_run = openai_client.beta.threads.runs.create(
-        model="GPT-4o mini",
-        thread_id=quiz_thread.id,
-        assistant_id=quiz_assistant.id
-    )
+    # Firestore 클라이언트 생성
+    db = firestore.client()
+    # 이 사용자의 User Doc
+    userDoc_ref = db.collection(Fb.COL_USERS).document(userDocId)
 
-    # 3개의 run의 실행 종료 대기
-    while chat_run.status == "queued" or chat_run.status == "in_progress":
-        time.sleep(0.5)
-        chat_run = openai_client.beta.threads.runs.retrieve(
-            thread_id=chat_thread.id,
-            run_id=chat_run.id
-        )
-    while corr_run.status == "queued" or corr_run.status == "in_progress":
-        time.sleep(0.5)
-        corr_run = openai_client.beta.threads.runs.retrieve(
-            thread_id=corr_thread.id,
-            run_id=corr_run.id
-        )
-    while quiz_run.status == "queued" or quiz_run.status == "in_progress":
-        time.sleep(0.5)
-        quiz_run = openai_client.beta.threads.runs.retrieve(
-            thread_id=quiz_thread.id,
-            run_id=quiz_run.id
-        )
+    # chat, corr, quiz 각각 스레드와 런을 만들어 실행하고 결과를 받는다.
+    for i in [Lt.I_CHAT, Lt.I_CORR, Lt.I_QUIZ]:
+        # 같은 첫번째 메세지로 스레드를 만들고 실행시킨다
+        status, message_dict, thread_id = create_new_thread_and_run(i, start_messages)
+        if status == "completed":
+            print(f"{thread_cols[i]} : {message_dict.content[0].text.value}")
+            # user Doc에 각 학습방식 스레드 Id 저장
+            userDoc_ref.update({thread_field_keys[i]: thread_id})
+            response_data[thread_field_keys[i]] = thread_id
+            # user Doc 밑에 해당 collection을(chat, corr, quiz) 만들고 대화 메세지를 넣는다.
+            doc_ref = userDoc_ref.collection(thread_cols[i]).document()
+            doc_ref.set({
+                Jk.KEY_ID: doc_ref.id,
+                Jk.KEY_ROLE: message_dict.role,
+                Jk.KEY_MESSAGE: message_dict.content[0].text.value
+            })
 
-    # TODO: 여기서 각 run의 status가 "completed"가 아닌 경우를 처리해야 하는데, 일단 통과
+    # user Doc에 새로 만든 3개 학습 방식 thread id를 기록
+    userDoc_ref.update(response_data)
 
-    chat_reply_message = ""
-    corr_reply_message = ""
-    quiz_reply_message = ""
+    # 새로운 학생으로 시작되었다는 Settings 메세지를 settings collection에 넣는다.
+    col_settings = db.collection(Fb.COL_SETTINGS)
+    doc_ref = col_settings.document()
+    doc_ref.set({
+        Jk.KEY_ID: doc_ref.id,
+        Jk.KEY_MESSAGE: f"{name}({age})님의 {nativeLang} 학습을 도와드리겠습니다.\n세가지 학습 방식을 잘 활용해 보세요.",
+        Jk.KEY_ROLE: Ok.ROLE_ASSIST
+    })
 
-    # ai 응답 받기
-
-    if chat_run.status == "completed":
-        chat_thread_messages = openai_client.beta.threads.messages.list(
-            thread_id=chat_thread.id,
-            order="desc",
-            limit=1
-        )
-        if chat_thread_messages:
-            chat_reply_message = chat_thread_messages.data[0].content[0].text.value
-
-    if corr_run.status == "completed":
-        corr_thread_messages = openai_client.beta.threads.messages.list(
-            thread_id=corr_thread.id,
-            order="desc",
-            limit=1
-        )
-        if corr_thread_messages:
-            corr_reply_message = corr_thread_messages.data[0].content[0].text.value
-
-    if quiz_run.status == "completed":
-        quiz_thread_messages = openai_client.beta.threads.messages.list(
-            thread_id=quiz_thread.id,
-            order="desc",
-            limit=1
-        )
-        if quiz_thread_messages:
-            quiz_reply_message = quiz_thread_messages.data[0].content[0].text.value
-
-    print(f"Chat:\n{chat_reply_message}")
-    print(f"Corr:\n{corr_reply_message}")
-    print(f"Quiz:\n{quiz_reply_message}")
-
-    # JSON 형식으로 응답 데이터 생성
-    response_data = {
-        "name": received_data.get("name", ""),
-        "age": received_data.get("age", ""),
-        "nativeLang": received_data.get("nativeLang", ""),
-        "learnLang": received_data.get("learnLang", ""),
-        "level": received_data.get("level", ""),
-        "userDocId": received_data.get("userDocId", ""),
-        "threadId": "thread id",
-        "message": f"여기에 인공지능의 메세지를 넣어서 보내줄 것입니다."
-    }
-
+    # 생성된 스레드 Id 정보를 응답으로 보낸다.
     return https_fn.Response(json.dumps({"data": response_data}), mimetype='application/json')
-
-
