@@ -1,4 +1,7 @@
-class Jk: # JSON KEY
+class Jk:  # JSON KEY
+    def __init__(self):
+        pass
+
     KEY_CREATED_AT = "createdAt"
     KEY_NAME = "name"
     KEY_AGE = "age"
@@ -13,8 +16,13 @@ class Jk: # JSON KEY
     KEY_CHAT_THREAD_ID = "chatThreadId"
     KEY_CORR_THREAD_ID = "corrThreadId"
     KEY_QUIZ_THREAD_ID = "quizThreadId"
+    KEY_RESULT = "result"
 
-class Fb: # Firebase KEY, COLLECTION, DOCUMENT
+
+class Fb:  # Firebase KEY, COLLECTION, DOCUMENT
+    def __init__(self):
+        pass
+
     COL_USERS = "users" # 1단계
     COL_SETTINGS = "settings"
     # 각 사용자 doc 밑에
@@ -23,7 +31,10 @@ class Fb: # Firebase KEY, COLLECTION, DOCUMENT
     COL_QUIZ = "quiz"   # 2단계
 
 
-class Ok: # OpenAi KEY
+class Ok:  # OpenAi KEY
+    def __init__(self):
+        pass
+
     KEY_ROLE = "role"
     KEY_CONTENT = "content"
     ROLE_USER = "user"
@@ -31,7 +42,10 @@ class Ok: # OpenAi KEY
     ROLE_SYSTEM = "system"
 
 
-class Lt: # Learn Type
+class Lt:  # Learn Type
+    def __init__(self):
+        pass
+
     I_CHAT = 0
     I_CORR = 1
     I_QUIZ = 2
@@ -40,3 +54,9 @@ class Lt: # Learn Type
     KEY_QUIZ = "quiz"
 
 
+class Rc:  # Reulst Code
+    def __init__(self):
+        pass
+
+    RC_SUCCESS = "success"
+    RC_FAIL = "fail"
