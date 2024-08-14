@@ -34,7 +34,7 @@ def on_request_example(req: https_fn.Request) -> https_fn.Response:
     return https_fn.Response(f"This is test")
 
 
-def create_new_thread_and_run(i_learn_type: int, start_messages: list) -> (str, dict, str):
+def create_new_thread_and_run(i_learn_type: int, start_messages: list) -> tuple[str, str, str]:
     # thread 생성.
     thread = openai_client.beta.threads.create(messages=start_messages)
     # 학습 type에 따른 run 생성
@@ -59,16 +59,16 @@ def create_new_thread_and_run(i_learn_type: int, start_messages: list) -> (str, 
         order="desc",
         limit=1
     )
-    reply_message = thread_messages.data[0] if thread_messages else ""
+    reply_message = thread_messages.data[0].content[0].text.value if thread_messages else ""
     return run.status, reply_message, thread.id
 
 
-def retrieve_thread_and_run(i_learn_type: int, thread_id: str, message: str) -> (str, dict):
+def retrieve_thread_and_run(learn_type_index: int, thread_id: str, message: str) -> tuple[str, str]:
     # 학습 type에 따른 run 생성
     run = openai_client.beta.threads.runs.create(
         model="gpt-4o",
         thread_id=thread_id,
-        assistant_id=assistants[i_learn_type].id,
+        assistant_id=assistants[learn_type_index].id,
         additional_messages=[
             {
                 Ok.KEY_ROLE: Ok.ROLE_USER,
@@ -92,7 +92,7 @@ def retrieve_thread_and_run(i_learn_type: int, thread_id: str, message: str) -> 
         order="desc",
         limit=1
     )
-    reply_message = thread_messages.data[0] if thread_messages else ""
+    reply_message = thread_messages.data[0].content[0].text.value if thread_messages else ""
     return run.status, reply_message
 
 
@@ -153,9 +153,9 @@ def on_request_start_new(req: https_fn.Request) -> https_fn.Response:
     # chat, corr, quiz 각각 스레드와 런을 만들어 실행하고 결과를 받는다.
     for i in [Lt.I_CHAT, Lt.I_CORR, Lt.I_QUIZ]:
         # 같은 첫번째 메세지로 스레드를 만들고 실행시킨다
-        status, message_dict, thread_id = create_new_thread_and_run(i, start_messages)
+        status, message, thread_id = create_new_thread_and_run(i, start_messages)
         if status == "completed":
-            print(f"{thread_cols[i]} : {message_dict.content[0].text.value}")
+            print(f"{thread_cols[i]} : {message}")
             # user Doc에 각 학습방식 스레드 Id 저장
             userDoc_ref.update({thread_field_keys[i]: thread_id})
             response_data[thread_field_keys[i]] = thread_id
@@ -163,8 +163,8 @@ def on_request_start_new(req: https_fn.Request) -> https_fn.Response:
             doc_ref = userDoc_ref.collection(thread_cols[i]).document()
             doc_ref.set({
                 Jk.KEY_ID: doc_ref.id,
-                Jk.KEY_ROLE: message_dict.role,
-                Jk.KEY_MESSAGE: message_dict.content[0].text.value,
+                Jk.KEY_ROLE: Ok.ROLE_ASSIST,
+                Jk.KEY_MESSAGE: message,
                 Jk.KEY_CREATED_AT: firestore.SERVER_TIMESTAMP
             })
 
@@ -186,7 +186,7 @@ def on_request_start_new(req: https_fn.Request) -> https_fn.Response:
 
 
 @https_fn.on_request()
-def on_request_chat_message(req: https_fn.Request) -> https_fn.Response:
+def on_request_user_message(req: https_fn.Request) -> https_fn.Response:
     # JSON 데이터 추출
     json_req = req.get_json(silent=True)
     if not json_req:
@@ -204,10 +204,13 @@ def on_request_chat_message(req: https_fn.Request) -> https_fn.Response:
         return https_fn.Response(json.dumps(error_response), status=400, mimetype='application/json')
     print(f"data: {received_data}")
 
+    learn_type = received_data.get(Jk.KEY_LEARN_TYPE)
     user_doc_id = received_data.get(Jk.KEY_DOC_ID)
-    thread_id = received_data.get(Jk.KEY_CHAT_THREAD_ID)
+    thread_id = received_data.get(Jk.KEY_THREAD_ID)
     message = received_data.get(Jk.KEY_MESSAGE)
-    print(f"userDocId:{user_doc_id}, threadId:{thread_id}, message:{message}")
+    print(f"learnType:{learn_type}, userDocId:{user_doc_id}, threadId:{thread_id}, message:{message}")
+
+    learn_type_index = Lt.I_CHAT if learn_type == Lt.KEY_CHAT else Lt.I_CORR if learn_type == Lt.KEY_CORR else Lt.I_QUIZ
 
     # colud function call의 응답 준비
     response_data: dict = {}
@@ -218,16 +221,16 @@ def on_request_chat_message(req: https_fn.Request) -> https_fn.Response:
     # 이 사용자의 User Doc
     userDoc_ref = db.collection(Fb.COL_USERS).document(user_doc_id)
 
-    status, message_dict = retrieve_thread_and_run(Lt.I_CHAT, thread_id, message)
+    status, message = retrieve_thread_and_run(learn_type_index, thread_id, message)
     if status == "completed":
-        print(f"{thread_cols[Lt.I_CHAT]} : {message_dict.content[0].text.value}")
+        print(f"{thread_cols[learn_type_index]} : {message}")
         # user Doc에 각 학습방식 스레드 Id 저장
         # user Doc 밑에 해당 chat collection에 AI의 대화 메세지를 넣는다.
-        doc_ref = userDoc_ref.collection(thread_cols[Lt.I_CHAT]).document()
+        doc_ref = userDoc_ref.collection(thread_cols[learn_type_index]).document()
         doc_ref.set({
             Jk.KEY_ID: doc_ref.id,
-            Jk.KEY_ROLE: message_dict.role,
-            Jk.KEY_MESSAGE: message_dict.content[0].text.value,
+            Jk.KEY_ROLE: Ok.ROLE_ASSIST,
+            Jk.KEY_MESSAGE: message,
             Jk.KEY_CREATED_AT: firestore.SERVER_TIMESTAMP
         })
         response_data[Jk.KEY_RESULT] = Rc.RC_SUCCESS
@@ -236,3 +239,55 @@ def on_request_chat_message(req: https_fn.Request) -> https_fn.Response:
 
     # 처리결과를 응답으로 보낸다.
     return https_fn.Response(json.dumps({"data": response_data}), mimetype='application/json')
+
+# @https_fn.on_request()
+# def on_request_chat_message(req: https_fn.Request) -> https_fn.Response:
+#     # JSON 데이터 추출
+#     json_req = req.get_json(silent=True)
+#     if not json_req:
+#         # 오류 응답
+#         print("No JSON request received")
+#         error_response = {"error": "No JSON request received"}
+#         return https_fn.Response(json.dumps(error_response), status=400, mimetype='application/json')
+#     print(f"Received JSON request: {json_req}")
+
+#     received_data = json_req.get("data", None)
+#     if not received_data:
+#         # 오류 응답
+#         print("No data key in received JSON request")
+#         error_response = {"error": "No data key in received JSON request"}
+#         return https_fn.Response(json.dumps(error_response), status=400, mimetype='application/json')
+#     print(f"data: {received_data}")
+
+#     user_doc_id = received_data.get(Jk.KEY_DOC_ID)
+#     thread_id = received_data.get(Jk.KEY_CHAT_THREAD_ID)
+#     message = received_data.get(Jk.KEY_MESSAGE)
+#     print(f"userDocId:{user_doc_id}, threadId:{thread_id}, message:{message}")
+
+#     # colud function call의 응답 준비
+#     response_data: dict = {}
+
+#     # Firestore 클라이언트 생성
+#     db = firestore.client()
+
+#     # 이 사용자의 User Doc
+#     userDoc_ref = db.collection(Fb.COL_USERS).document(user_doc_id)
+
+#     status, message_dict = retrieve_thread_and_run(Lt.I_CHAT, thread_id, message)
+#     if status == "completed":
+#         print(f"{thread_cols[Lt.I_CHAT]} : {message_dict.content[0].text.value}")
+#         # user Doc에 각 학습방식 스레드 Id 저장
+#         # user Doc 밑에 해당 chat collection에 AI의 대화 메세지를 넣는다.
+#         doc_ref = userDoc_ref.collection(thread_cols[Lt.I_CHAT]).document()
+#         doc_ref.set({
+#             Jk.KEY_ID: doc_ref.id,
+#             Jk.KEY_ROLE: message_dict.role,
+#             Jk.KEY_MESSAGE: message_dict.content[0].text.value,
+#             Jk.KEY_CREATED_AT: firestore.SERVER_TIMESTAMP
+#         })
+#         response_data[Jk.KEY_RESULT] = Rc.RC_SUCCESS
+#     else:
+#         response_data[Jk.KEY_RESULT] = Rc.RC_FAIL
+
+#     # 처리결과를 응답으로 보낸다.
+#     return https_fn.Response(json.dumps({"data": response_data}), mimetype='application/json')

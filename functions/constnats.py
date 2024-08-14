@@ -13,10 +13,12 @@ class Jk:  # JSON KEY
     KEY_ROLE = "role"
     KEY_MESSAGE = "message"
     KEY_ID = "id"
+    KEY_THREAD_ID = "threadId"
     KEY_CHAT_THREAD_ID = "chatThreadId"
     KEY_CORR_THREAD_ID = "corrThreadId"
     KEY_QUIZ_THREAD_ID = "quizThreadId"
     KEY_RESULT = "result"
+    KEY_LEARN_TYPE = "learnType"
 
 
 class Fb:  # Firebase KEY, COLLECTION, DOCUMENT
